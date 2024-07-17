@@ -226,7 +226,7 @@ class LaunchableWave(Launchable):
         ]
 
     def get_grid_shape(self, constraints: list[ConstraintsMeta]) -> list[IndexExpr]:
-        grid = [None, None]
+        grid = [None, None, None]
         for constraint in self.workgroup_constraints:
             grid[constraint.workgroup_dim] = constraint.dim // constraint.tile_size
         return grid
@@ -776,11 +776,11 @@ class LaunchableWave(Launchable):
         for stage, nodes in self.nodes_by_stage.items():
             for node in nodes:
                 if "mma" in node.name:
-                    i, j, k = node.name.split("_")[-3:]
+                    b, i, j, k = node.name.split("_")[-4:]
                     if int(k) != self.batch_k - 1:
                         continue
                     for iter_arg in iter_args:
-                        if iter_arg.name == f"c_reg_{i}_{j}":
+                        if iter_arg.name == f"c_reg_{b}_{i}_{j}":
                             node_to_stage[iter_arg] = stage
                             staged_value_map[stage][iter_arg] = iter_arg
 
@@ -835,7 +835,7 @@ class LaunchableWave(Launchable):
                 if "mma" in node.name:
                     last_index = int(node.name.split("_")[-1])
                     if last_index == self.batch_k - 1:
-                        indices = node.name.split("_")[-3:-1]
+                        indices = node.name.split("_")[-4:-1]
                         c_reg_name = "_".join(["c_reg"] + indices)
                         result_map[c_reg_name] = new_node
                         c_reg_node = find_c_node(node)
@@ -1057,8 +1057,10 @@ class LaunchableWave(Launchable):
         def initialize_creg_mapping(staged_value_map, stage: int):
             for node in expanded_graph.nodes:
                 if "c_reg" in node.name:
-                    i, j = node.name.split("_")[-2:]
-                    reg_node_name = "_".join(["construct_register_from_metadata", i, j])
+                    b, i, j = node.name.split("_")[-3:]
+                    reg_node_name = "_".join(
+                        ["construct_register_from_metadata", b, i, j]
+                    )
                     staged_value_map[stage][node.name] = value_map[reg_node_name]
 
         def update_value_map(name: str, node: fx.Node):
@@ -1067,9 +1069,9 @@ class LaunchableWave(Launchable):
             # we need to update the value mapper for the corresponding
             # c_reg.
             if "mma" in name:
-                i, j, k = name.split("_")[-3:]
+                b, i, j, k = name.split("_")[-4:]
                 if int(k) == self.batch_k - 1:
-                    c_reg_name = "_".join(["c_reg", i, j])
+                    c_reg_name = "_".join(["c_reg", b, i, j])
                     value_map[c_reg_name] = new_node
 
         def epilogue_arg_mapper(node: fx.Node):
@@ -1189,21 +1191,26 @@ class LaunchableWave(Launchable):
         hardware_constraint = self.hardware_constraints[0]
         mma_m, mma_n, mma_k = hardware_constraint.mma_matrix_shapes()
         # TODO: This is hardcoded and should be deduced based on dimension mappings.
-        waves_m, waves_n, _ = hardware_constraint.waves_per_block
+        waves_b, waves_m, waves_n = hardware_constraint.waves_per_block
         for sym, val in idxc.frozen_subs:
+            if sym.name == "BLOCK_B":
+                block_b = val
             if sym.name == "BLOCK_M":
                 block_m = val
             if sym.name == "BLOCK_N":
                 block_n = val
             if sym.name == "BLOCK_K":
                 block_k = val
+        self.batch_b = block_b // waves_b
         self.batch_m = (block_m // waves_m) // mma_m
         self.batch_n = (block_n // waves_n) // mma_n
         self.batch_k = block_k // mma_k
         repeat_times = {
+            "B": self.batch_b,
             "M": self.batch_m,
             "N": self.batch_n,
             "K": self.batch_k,
+            "BLOCK_B": self.batch_b,
             "BLOCK_M": self.batch_m,
             "BLOCK_N": self.batch_n,
             "BLOCK_K": self.batch_k,
@@ -1218,24 +1225,24 @@ class LaunchableWave(Launchable):
         root_graph = trace.get_root_graph()
         expanded_graph = fx.Graph()
 
-        index_suffix = lambda i, j: "_" + str(i) + "_" + str(j)
-        mma_index_suffix = lambda i, j, k: index_suffix(i, j) + "_" + str(k)
+        index_suffix = lambda b, i, j: "_" + str(b) + "_" + str(i) + "_" + str(j)
+        mma_index_suffix = lambda b, i, j, k: index_suffix(b, i, j) + "_" + str(k)
 
-        def transform_args(i: int, j: int, arg: fx.Node):
+        def transform_args(b: int, i: int, j: int, arg: fx.Node):
             if arg.op == "placeholder" or "alloc" in arg.name:
                 return arg
-            new_arg_name = arg.name + index_suffix(i, j)
+            new_arg_name = arg.name + index_suffix(b, i, j)
             for node in expanded_graph.nodes:
                 if node.name == new_arg_name:
                     return node
             return None
 
-        def transform_mma_args(i: int, j: int, k: int, arg: fx.Node):
+        def transform_mma_args(b: int, i: int, j: int, k: int, arg: fx.Node):
             if arg.op == "placeholder":
                 if k == 0:
-                    new_arg_name = arg.name + index_suffix(i, j)
+                    new_arg_name = arg.name + index_suffix(b, i, j)
                 else:
-                    new_arg_name = "mma" + mma_index_suffix(i, j, k - 1)
+                    new_arg_name = "mma" + mma_index_suffix(b, i, j, k - 1)
                 for node in expanded_graph.nodes:
                     if node.name == new_arg_name:
                         return node
@@ -1250,9 +1257,9 @@ class LaunchableWave(Launchable):
                             break
             match index:
                 case 0:
-                    new_arg_name = arg.name + index_suffix(i, k)
+                    new_arg_name = arg.name + index_suffix(b, i, k)
                 case 1:
-                    new_arg_name = arg.name + index_suffix(j, k)
+                    new_arg_name = arg.name + index_suffix(b, j, k)
                 case _:
                     return None
             for node in expanded_graph.nodes:
@@ -1260,30 +1267,34 @@ class LaunchableWave(Launchable):
                     return node
             return None
 
-        def duplicate_node(m: int, k: int, node: fx.Node):
-            for i in range(m):
-                for j in range(k):
-                    new_node = expanded_graph.node_copy(
-                        node, partial(transform_args, i, j)
-                    )
-                    new_node.name = node.name + index_suffix(i, j)
-                    if "index" in node.meta:
-                        mma_tile_sizes = self.utils.get_mma_tile_sizes(new_node)
-                        new_node.meta["index"] = [
-                            new_node.meta["index"][0] + sympy.Mul(i, mma_tile_sizes[0]),
-                            new_node.meta["index"][1] + sympy.Mul(j, mma_tile_sizes[1]),
-                        ]
-
-        def duplicate_mma_node(M: int, N: int, K: int, node: fx.Node):
-            outputs = []
-            for i in range(M):
-                for j in range(N):
-                    for k in range(K):
+        def duplicate_node(B: int, M: int, K: int, node: fx.Node):
+            for b in range(B):
+                for i in range(M):
+                    for j in range(K):
                         new_node = expanded_graph.node_copy(
-                            node, partial(transform_mma_args, i, j, k)
+                            node, partial(transform_args, b, i, j)
                         )
-                        new_node.name = node.name + mma_index_suffix(i, j, k)
-                    outputs.append(new_node)
+                        new_node.name = node.name + index_suffix(b, i, j)
+                        if "index" in node.meta:
+                            mma_tile_sizes = self.utils.get_mma_tile_sizes(new_node)
+                            new_node.meta["index"] = [
+                                new_node.meta["index"][0]
+                                + sympy.Mul(i, mma_tile_sizes[0]),
+                                new_node.meta["index"][1]
+                                + sympy.Mul(j, mma_tile_sizes[1]),
+                            ]
+
+        def duplicate_mma_node(B: int, M: int, N: int, K: int, node: fx.Node):
+            outputs = []
+            for b in range(B):
+                for i in range(M):
+                    for j in range(N):
+                        for k in range(K):
+                            new_node = expanded_graph.node_copy(
+                                node, partial(transform_mma_args, b, i, j, k)
+                            )
+                            new_node.name = node.name + mma_index_suffix(b, i, j, k)
+                        outputs.append(new_node)
             return outputs
 
         for graph in subgraphs.values():
@@ -1296,7 +1307,7 @@ class LaunchableWave(Launchable):
                     continue
                 if "mma" in node.name:
                     outputs = duplicate_mma_node(
-                        self.batch_m, self.batch_n, self.batch_k, node
+                        self.batch_b, self.batch_m, self.batch_n, self.batch_k, node
                     )
                     continue
                 if "output" in node.name:
@@ -1313,23 +1324,34 @@ class LaunchableWave(Launchable):
                         if arg.meta["type"] is not None:
                             node_type = arg.meta["type"]
                             break
-                if len(node_type.symbolic_shape) == 2:
-                    repeat0, repeat1 = [
+                # repeat0 now captures batch repetitions.
+                repeat0 = 1
+                if len(node_type.symbolic_shape) == 3:
+                    repeat0, repeat1, repeat2 = [
+                        repeat_times[x.name] for x in node_type.symbolic_shape
+                    ]
+                elif len(node_type.symbolic_shape) == 2:
+                    repeat1, repeat2 = [
                         repeat_times[x.name] for x in node_type.symbolic_shape
                     ]
                 elif len(node_type.symbolic_shape) == 1:
-                    repeat0 = repeat_times[node_type.symbolic_shape[0].name]
-                    repeat1 = 0
+                    repeat1 = repeat_times[node_type.symbolic_shape[0].name]
+                    repeat2 = 0
                 else:
                     raise ValueError("Only 1D and 2D shapes supported.")
 
-                duplicate_node(repeat0, repeat1, node)
+                duplicate_node(repeat0, repeat1, repeat2, node)
 
         expanded_root_graph = fx.Graph()
         duplicate_map = {}
 
         def duplicate_root_node(
-            m: int, k: int, node: fx.Node, loop_results: list[fx.Node], duplicates_map
+            b: int,
+            m: int,
+            k: int,
+            node: fx.Node,
+            loop_results: list[fx.Node],
+            duplicates_map,
         ):
             def arg_mapper(suffix: str):
                 def _(node: fx.Node):
@@ -1352,43 +1374,47 @@ class LaunchableWave(Launchable):
                 return _
 
             duplicates = []
+            b = max(b, 1)
             m = max(m, 1)
             k = max(k, 1)
-            for i in range(m):
-                for j in range(k):
-                    # The arg_mapper here does not correctly map the write_shared
-                    # before the add the the corresponding read.
-                    suffix = index_suffix(i, j)
-                    new_node = expanded_root_graph.node_copy(node, arg_mapper(suffix))
-                    new_node.name = node.name + suffix
-                    duplicates.append(new_node)
+            for a in range(b):
+                for i in range(m):
+                    for j in range(k):
+                        # The arg_mapper here does not correctly map the write_shared
+                        # before the add the the corresponding read.
+                        suffix = index_suffix(a, i, j)
+                        new_node = expanded_root_graph.node_copy(
+                            node, arg_mapper(suffix)
+                        )
+                        new_node.name = node.name + suffix
+                        duplicates.append(new_node)
 
-                    mma_tile_sizes = self.utils.get_mma_tile_sizes(new_node)
-                    if "index" in node.meta:
-                        old_index = new_node.meta["index"]
-                        # For now special case for values which are indexed only in one dimension
-                        # TODO: Needs to be modified to handle 32x32x8 instruction
-                        if len(old_index) == 1:
-                            if m == 1:
-                                new_node.meta["index"] = [
-                                    old_index[0] + sympy.Mul(i, 16)
-                                ]
-                            elif k == 1:
-                                new_node.meta["index"] = [
-                                    old_index[0] + sympy.Mul(j, 16)
-                                ]
-                            elif "add" in node.name:
-                                # TODO: Hack for add
-                                new_node.meta["index"] = [
-                                    old_index[0] + sympy.Mul(j, 16)
-                                ]
+                        mma_tile_sizes = self.utils.get_mma_tile_sizes(new_node)
+                        if "index" in node.meta:
+                            old_index = new_node.meta["index"]
+                            # For now special case for values which are indexed only in one dimension
+                            # TODO: Needs to be modified to handle 32x32x8 instruction
+                            if len(old_index) == 1:
+                                if m == 1:
+                                    new_node.meta["index"] = [
+                                        old_index[0] + sympy.Mul(i, 16)
+                                    ]
+                                elif k == 1:
+                                    new_node.meta["index"] = [
+                                        old_index[0] + sympy.Mul(j, 16)
+                                    ]
+                                elif "add" in node.name:
+                                    # TODO: Hack for add
+                                    new_node.meta["index"] = [
+                                        old_index[0] + sympy.Mul(j, 16)
+                                    ]
+                                else:
+                                    raise Exception("Invalid indexing")
                             else:
-                                raise Exception("Invalid indexing")
-                        else:
-                            new_node.meta["index"] = [
-                                old_index[0] + sympy.Mul(i, mma_tile_sizes[0]),
-                                old_index[1] + sympy.Mul(j, mma_tile_sizes[1]),
-                            ]
+                                new_node.meta["index"] = [
+                                    old_index[0] + sympy.Mul(i, mma_tile_sizes[0]),
+                                    old_index[1] + sympy.Mul(j, mma_tile_sizes[1]),
+                                ]
             return duplicates
 
         loop_results = []
@@ -1410,8 +1436,10 @@ class LaunchableWave(Launchable):
                             expanded_root_graph, get_result, new_node, idx
                         )
                         get_res.emit()
+                        # TODO: Verify the correctness of this delinearization.
                         get_res.fx_node.meta["output_index"] = [
-                            idx // self.batch_n,
+                            idx // (self.batch_n * self.batch_m),
+                            (idx // self.batch_n) % self.batch_m,
                             idx % self.batch_n,
                         ]
                         loop_results.append(get_res.fx_node)
@@ -1431,13 +1459,19 @@ class LaunchableWave(Launchable):
                     if arg.meta["type"] is not None:
                         node_type = arg.meta["type"]
                         break
-            if len(node_type.symbolic_shape) == 2:
-                repeat_0, repeat_1 = [
+            # Repeat 0 now captures batch repetitions.
+            repeat_0 = 1
+            if len(node_type.symbolic_shape) == 3:
+                repeat_0, repeat_1, repeat_2 = [
+                    repeat_times[x.name] for x in node_type.symbolic_shape
+                ]
+            elif len(node_type.symbolic_shape) == 2:
+                repeat_1, repeat_2 = [
                     repeat_times[x.name] for x in node_type.symbolic_shape
                 ]
             elif len(node_type.symbolic_shape) == 1:
-                repeat_0 = repeat_times[node_type.symbolic_shape[0].name]
-                repeat_1 = 0
+                repeat_1 = repeat_times[node_type.symbolic_shape[0].name]
+                repeat_2 = 0
                 # TODO: This does not quite work yet
                 # if "add" in node.name and (
                 #     (
@@ -1455,7 +1489,7 @@ class LaunchableWave(Launchable):
             else:
                 raise ValueError("Only 1D and 2D shapes supported.")
             duplicates = duplicate_root_node(
-                repeat_0, repeat_1, node, loop_results, duplicate_map
+                repeat_0, repeat_1, repeat_2, node, loop_results, duplicate_map
             )
             duplicate_map[node] = duplicates
 
@@ -1474,9 +1508,9 @@ class LaunchableWave(Launchable):
             self.dependenceGraph.addNode(self.node_mapper[node])
 
         def get_output_to_node(node: fx.Node):
-            i, j, _ = node.name.split("_")[-3:]
+            b, i, j, _ = node.name.split("_")[-4:]
             for node in graph.nodes:
-                if self.utils.is_creg_with_indices(i, j, node):
+                if self.utils.is_creg_with_indices(b, i, j, node):
                     return node
             return None
 
@@ -2110,16 +2144,18 @@ class LaunchableWave(Launchable):
             read_node.meta = deepcopy(reads[0].meta)
             # Remove mma-based thread indexing, replace with new indexing
             row_tile_size = (total_threads * elements_per_load) // block_k
-            for j in range(len(read_node.meta["index"])):
+            rank = len(read_node.meta["index"])
+            offset = 1 if rank == 3 else 0
+            for j in range(rank):
                 read_node.meta["index"][j] = read_node.meta["index"][j].subs(
                     {t: 0 for t in thread_ids}
                 )
-                if j == 0:
+                if j == 0 + offset:
                     read_node.meta["index"][j] += row_tile_size * i
                     read_node.meta["index"][j] += sympy.floor(
                         thread_id / (block_k // elements_per_load)
                     )
-                if j == 1:
+                if j == 1 + offset:
                     read_node.meta["index"][j] += sympy.Mod(
                         elements_per_load * thread_id, block_k
                     )
@@ -2142,9 +2178,9 @@ class LaunchableWave(Launchable):
         self, graph: fx.Graph, idxc: IndexingContext
     ) -> fx.Graph:
         hardware_constraint = self.hardware_constraints[0]
-        waves_m, waves_n, _ = hardware_constraint.waves_per_block
+        waves_b, waves_m, waves_n = hardware_constraint.waves_per_block
         total_threads = (
-            self.hardware_constraints[0].threads_per_wave * waves_m * waves_n
+            self.hardware_constraints[0].threads_per_wave * waves_m * waves_n * waves_b
         )
         elements_per_load = tkl.sym.GLOBAL_LOAD_ELEMS_PER_THREAD
         block_k = tkl.sym.BLOCK_K.subs(idxc.subs)

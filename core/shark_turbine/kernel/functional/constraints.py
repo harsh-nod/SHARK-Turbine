@@ -19,6 +19,7 @@ class ConstraintsMeta(ABC):
         self.workgroup_ids = [
             tkl.sym.WG0,
             tkl.sym.WG1,
+            tkl.sym.WG2,
         ]
         self.thread_ids = [
             tkl.sym.TX,
@@ -53,8 +54,10 @@ class WorkgroupConstraint(ConstraintsMeta):
                 wg_dim = self.workgroup_ids[0]
             case 1:
                 wg_dim = self.workgroup_ids[1]
+            case 2:
+                wg_dim = self.workgroup_ids[2]
             case _:
-                raise ValueError("Invalid workgroup index. Expected 0 or 1")
+                raise ValueError("Invalid workgroup index. Expected 0, 1 or 2")
         return wg_dim * self.tile_size
 
 

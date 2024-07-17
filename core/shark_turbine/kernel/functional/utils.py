@@ -155,7 +155,7 @@ class Utils:
         cregi, cregj = creg.name.split("_")[-2:]
         for node in graph.nodes:
             if "mma" in node.name and f"mve{stage_index}" in node.name:
-                i, j, k = node.name.split("_")[-3:]
+                b, i, j, k = node.name.split("_")[-4:]
                 if int(k) == k_index and i == cregi and j == cregj:
                     return node
 
@@ -163,18 +163,18 @@ class Utils:
         self, node: fx.Node, stage_index: int, k_index: int
     ) -> bool:
         if "mma" in node.name and f"mve{stage_index}" in node.name:
-            i, j, k = node.name.split("_")[-3:]
+            b, i, j, k = node.name.split("_")[-4:]
             return int(k) == k_index
         return False
 
     def get_matching_creg(self, mma_node: fx.Node, graph: fx.Graph) -> fx.Node:
-        i, j, _ = mma_node.name.split("_")[-3:]
+        b, i, j, _ = mma_node.name.split("_")[-4:]
         for node in graph.nodes:
-            if f"c_reg_{i}_{j}" in node.name:
+            if f"c_reg_{b}_{i}_{j}" in node.name:
                 return node
 
-    def is_creg_with_indices(self, i: int, j: int, node: fx.Node) -> bool:
-        return f"c_reg_{i}_{j}" in node.name
+    def is_creg_with_indices(self, b: int, i: int, j: int, node: fx.Node) -> bool:
+        return f"c_reg_{b}_{i}_{j}" in node.name
 
     def get_node_from_root(self, target: fx.Node, root_graph: fx.Graph) -> fx.Node:
         for node in root_graph.nodes:
@@ -211,9 +211,9 @@ class Utils:
         return node.name.split("_")[:-2]
 
     def get_mma_k_index(self, node: fx.Node) -> int:
-        _, _, k = node.name.split("_")[-3:]
+        _, _, _, k = node.name.split("_")[-4:]
         return int(k)
 
     def get_read_k_index(self, node: fx.Node) -> int:
-        _, k = node.name.split("_")[-2:]
+        _, _, k = node.name.split("_")[-3:]
         return int(k)

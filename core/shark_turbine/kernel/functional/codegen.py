@@ -165,6 +165,7 @@ class WaveEmitter:
         self.workgroup_ids = [
             stream_d.dispatch_workgroup_id(IntegerAttr.get(IndexType.get(), 0)),
             stream_d.dispatch_workgroup_id(IntegerAttr.get(IndexType.get(), 1)),
+            stream_d.dispatch_workgroup_id(IntegerAttr.get(IndexType.get(), 2)),
         ]
         self.thread_ids = [
             gpu_d.thread_id(gpu_d.Dimension.x),
@@ -276,7 +277,7 @@ def gen_sympy_index(emitter: WaveEmitter, expr: sympy.Expr, stage: int) -> OpRes
     stack: list[OpResult] = []
     # TODO: factor this out
     all_symbols = emitter.thread_ids + emitter.workgroup_ids + [emitter.induction_var]
-    dynamics = dict(zip(["TX", "TY", "TZ", "WG0", "WG1", "ARG0"], all_symbols))
+    dynamics = dict(zip(["TX", "TY", "TZ", "WG0", "WG1", "WG2", "ARG0"], all_symbols))
     idxc = IndexingContext.current()
     # Substitute in frozen vars to simplify expression.
     if not isinstance(expr, sympy.Expr):
