@@ -39,9 +39,7 @@ class Test(unittest.TestCase):
         constraints += [tkf.WaveConstraint(M, BLOCK_M / 2, 0, 64)]
         constraints += [tkf.WaveConstraint(N, BLOCK_N / 2, 1, 64)]
         constraints += [
-            tkf.HardwareConstraint(
-                threads_per_wave=64, mma_type="MFMA_F32_16x16x16_F16"
-            )
+            tkf.HardwareConstraint(threads_per_wave=64, mma_type="MFMA_I32_16x16x32_I8")
         ]
 
         # Wave-level micro-kernel.
@@ -77,17 +75,17 @@ class Test(unittest.TestCase):
 
         hyperparams = {
             ADDRESS_SPACE: tkl.AddressSpace.SHARED_MEMORY.value,
-            LOAD_ELEMS_PER_THREAD: 4,
+            LOAD_ELEMS_PER_THREAD: 8,
             STORE_ELEMS_PER_THREAD: 1,
-            GLOBAL_LOAD_ELEMS_PER_THREAD: 8,
+            GLOBAL_LOAD_ELEMS_PER_THREAD: 16,
             UNROLL_FACTOR: 1,
-            BLOCK_M: 64,
-            BLOCK_N: 64,
+            BLOCK_M: 128,
+            BLOCK_N: 128,
             BLOCK_K: 32,
             MMA_M: 16,
             MMA_N: 16,
-            MMA_K: 16,
-            M: 2048,
+            MMA_K: 32,
+            M: 1024,
             N: 10240,
             K: 1280,
         }
