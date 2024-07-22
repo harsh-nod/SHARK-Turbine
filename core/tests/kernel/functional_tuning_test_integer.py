@@ -8,6 +8,7 @@ import subprocess
 import time
 import os
 import numpy as np
+from utils import convert_mm_to_bmm
 
 BLOCK_M = [32, 64, 128, 256]
 BLOCK_N = [32, 64, 128, 256]
@@ -20,26 +21,54 @@ RESOURCE_GLOBAL = list(range(1, 20))
 DELAY_MMA = list(range(1, 20))
 DELAY_SHARED = list(range(1, 20))
 DELAY_GLOBAL = list(range(1, 20))
-MATRIX_M = 2048
-MATRIX_N = 10240
-MATRIX_K = 1280
-BUILD_DIR = "/data/home/perf/harsh/iree-build/tools/"
-DEVICE = 4
+MATRIX_B = 2
+configuration = 1
+if configuration == 0:
+    # Configuration 0
+    MATRIX_M = 1024
+    MATRIX_N = 10240
+    MATRIX_K = 1280
+    BLOCK_M = [128]
+    BLOCK_N = [320]
+    BLOCK_K = [128]
+    RATIO_M = [2]
+    RATIO_N = [4]
+elif configuration == 1:
+    # Configuration 1
+    MATRIX_M = 1024
+    MATRIX_N = 1280
+    MATRIX_K = 5120
+    BLOCK_M = [128]
+    BLOCK_N = [80]
+    BLOCK_K = [256]
+    RATIO_M = [4]
+    RATIO_N = [1]
+elif configuration == 2:
+    # Configuration 2
+    MATRIX_M = 1024
+    MATRIX_N = 1280
+    MATRIX_K = 1280
+    BLOCK_M = [64]
+    BLOCK_N = [160]
+    BLOCK_K = [128]
+    RATIO_M = [2]
+    RATIO_N = [2]
+
+# Location of iree-compile, iree-run-module and iree-benchmark-module
+BUILD_DIR = "/home/harmenon/iree-build/tools/"
+# Location of reference a, b, c matrices and iree_ref output
+VALIDATION_FILES_DIR = "/home/harmenon/batch_matmul/mma_files/"
+DEVICE = 0
 TIMEOUT = 60
 
-BLOCK_M = [128]
-BLOCK_N = [128]
-BLOCK_K = [32]
-RATIO_M = [1]
-RATIO_N = [1]
-RESOURCE_MMA = [2]
-RESOURCE_SHARED = [2]
+RESOURCE_MMA = [4]
+RESOURCE_SHARED = [4]
 RESOURCE_GLOBAL = [2]
-DELAY_MMA = [2]
+DELAY_MMA = [1]
 DELAY_SHARED = [1]
-DELAY_GLOBAL = [5]
+DELAY_GLOBAL = [1]
 MMA_INSTRUCTION = ["MFMA_I32_16x16x32_I8"]
-UNROLL_FACTOR = [2]
+UNROLL_FACTOR = [1]
 
 
 def run_command(command, timeout_limit):
@@ -79,7 +108,7 @@ def run_command(command, timeout_limit):
 def compile_to_vmfb():
     cmd = [
         os.path.join(BUILD_DIR, "iree-compile"),
-        "/data/home/perf/harsh/SHARK-Turbine/mma.mlir",
+        f"{os.getcwd()}/bmma.mlir",
         "--iree-hal-target-backends=rocm",
         "--iree-rocm-target-chip=gfx942",
         "--iree-rocm-bc-dir=/opt/rocm/amdgcn/bitcode",
@@ -96,13 +125,13 @@ def compile_to_vmfb():
 def run_and_validate_result():
     cmd = [
         os.path.join(BUILD_DIR, "iree-run-module"),
-        f"--device=rocm://{DEVICE}",
+        f"--device=hip://{DEVICE}",
         "--device_allocator=caching",
         "--module=mma.vmfb",
         "--function=isolated_benchmark",
-        f"--input=@/data/home/perf/harsh/mma_files/a_matrix_{MATRIX_M}x{MATRIX_N}x{MATRIX_K}.npy",
-        f"--input=@/data/home/perf/harsh/mma_files/b_matrix_{MATRIX_M}x{MATRIX_N}x{MATRIX_K}.npy",
-        f"--output=@/data/home/perf/harsh/mma_files/output_{MATRIX_M}x{MATRIX_N}x{MATRIX_K}.npy",
+        f"--input=@{VALIDATION_FILES_DIR}/a_matrix_{MATRIX_M}x{MATRIX_N}x{MATRIX_K}.npy",
+        f"--input=@{VALIDATION_FILES_DIR}/b_matrix_{MATRIX_M}x{MATRIX_N}x{MATRIX_K}.npy",
+        f"--output=@{VALIDATION_FILES_DIR}/output_{MATRIX_M}x{MATRIX_N}x{MATRIX_K}.npy",
     ]
     output, error = run_command(cmd, TIMEOUT)
     if error is not None:
@@ -110,13 +139,13 @@ def run_and_validate_result():
     computed = np.load(
         os.path.join(
             os.getcwd(),
-            f"/data/home/perf/harsh/mma_files/output_{MATRIX_M}x{MATRIX_N}x{MATRIX_K}.npy",
+            f"{VALIDATION_FILES_DIR}/output_{MATRIX_M}x{MATRIX_N}x{MATRIX_K}.npy",
         )
     )
     reference = np.load(
         os.path.join(
             os.getcwd(),
-            f"/data/home/perf/harsh/mma_files/iree_ref_{MATRIX_M}x{MATRIX_N}x{MATRIX_K}.npy",
+            f"{VALIDATION_FILES_DIR}/iree_ref_{MATRIX_M}x{MATRIX_N}x{MATRIX_K}.npy",
         )
     )
     max_error = np.max(np.abs(computed - reference))
@@ -128,14 +157,16 @@ def run_and_validate_result():
 def benchmark():
     cmd = [
         os.path.join(BUILD_DIR, "iree-benchmark-module"),
-        f"--device=rocm://{DEVICE}",
+        f"--device=hip://{DEVICE}",
         "--device_allocator=caching",
+        "--hip_use_streams=true",
+        "--hip_allow_inline_execution=true",
         "--module=mma.vmfb",
         "--function=isolated_benchmark",
-        "--batch_size=1000",
+        # "--batch_size=1000",
         "--benchmark_repetitions=3",
-        f"--input={MATRIX_M}x{MATRIX_K}xf16",
-        f"--input={MATRIX_N}x{MATRIX_K}xf16",
+        f"--input={MATRIX_B}x{MATRIX_M}x{MATRIX_K}xi8",
+        f"--input={MATRIX_N}x{MATRIX_K}xi8",
     ]
     output, error = run_command(cmd, TIMEOUT)
     decoded_output = output.decode("utf-8")
@@ -231,6 +262,9 @@ def testGemm(
     if mma_instruction == "MFMA_F32_32x32x8_F16":
         mma_m = mma_n = 32
         mma_k = 8
+    if mma_instruction == "MFMA_I32_16x16x32_I8":
+        mma_m = mma_n = 16
+        mma_k = 32
 
     # Wave-level micro-kernel.
     # Since warps are not directly addressable, there is no
@@ -289,6 +323,9 @@ def testGemm(
             gemm(a, b, c)
     except:
         return
+
+    # Convert mm -> bmm
+    convert_mm_to_bmm("mma.mlir", MATRIX_B, MATRIX_M, MATRIX_N, MATRIX_K, "i8", "i32")
 
     # Compile mma.mlir -> mma.vmfb
     success = compile_to_vmfb()
